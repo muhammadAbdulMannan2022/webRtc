@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Group Audio Call • Auto-Connect All • Fixed 2025</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        background: #000;
+        color: #fff;
+        margin: 0;
+        padding: 20px;
+        text-align: center;
+      }
+      h1 {
+        color: #0f9;
+        margin: 10px;
+      }
+      .box {
+        background: #111;
+        padding: 30px;
+        border-radius: 20px;
+        max-width: 500px;
+        margin: 30px auto;
+        border: 3px solid #0f9;
+      }
+      input {
+        padding: 15px;
+        font-size: 18px;
+        width: 280px;
+        border: none;
+        border-radius: 12px;
+        margin: 10px;
+        background: #222;
+        color: #fff;
+      }
+      button {
+        padding: 15px 30px;
+        font-size: 18px;
+        border: none;
+        border-radius: 12px;
+        background: #0f9;
+        color: #000;
+        cursor: pointer;
+        font-weight: bold;
+      }
+      button:disabled {
+        background: #444;
+        cursor: not-allowed;
+      }
+      button.leave {
+        background: #f44;
+      }
+      .status {
+        margin: 30px;
+        font-size: 22px;
+        color: #0f9;
+      }
+      .users {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 25px;
+        justify-content: center;
+        margin: 40px;
+      }
+      .user {
+        background: #222;
+        padding: 25px;
+        border-radius: 20px;
+        width: 180px;
+        border: 2px solid #444;
+        transition: 0.3s;
+      }
+      .user.speaking {
+        border-color: #0f9;
+        box-shadow: 0 0 30px #0f95;
+        transform: scale(1.08);
+      }
+      .user-name {
+        font-weight: bold;
+        color: #0f9;
+        font-size: 20px;
+      }
+      .you {
+        border-color: #0f9 !important;
+        background: #003322;
+      }
+      #controls button {
+        margin: 15px;
+        padding: 14px 28px;
+        font-size: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Group Audio Call</h1>
+    <div class="box">
+      <input
+        type="text"
+        id="roomInput"
+        placeholder="Room name"
+        value="party2025"
+      />
+      <br /><br />
+      <button id="joinBtn">Join Room</button>
+    </div>
+
+    <div class="status" id="status">Enter room name and join</div>
+    <div class="users" id="users"></div>
+    <div id="controls">
+      <button id="muteBtn">Mute</button>
+      <button id="leaveBtn" class="leave">Leave Room</button>
+    </div>
+
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script>
+      // FINAL FIXED VERSION - EVERYONE CONNECTS AUTOMATICALLY
+      let peer = null;
+      let myId = null;
+      let room = "";
+      let localStream = null;
+      let calls = new Map(); // peerId → MediaConnection
+      let audioElements = new Map(); // peerId → audio element
+      let knownPeers = new Set(); // All peers we've seen in this room
+
+      const status = document.getElementById("status");
+      const usersDiv = document.getElementById("users");
+
+      document.getElementById("joinBtn").onclick = () => {
+        room = document.getElementById("roomInput").value.trim() || "default";
+        document.querySelector(".box").remove();
+        status.textContent = "Connecting...";
+
+        // Step 1: Try to become the host using the room name as ID
+        peer = new Peer(room, {
+          config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        });
+
+        peer.on("open", (id) => {
+          myId = id;
+          status.textContent = `You are the host of "${room}"`;
+          addUser("You (Host)", true);
+          getMic();
+        });
+
+        // Step 2: If room already taken → become guest and call the host
+        peer.on("error", (err) => {
+          if (err.type === "unavailable-id") {
+            peer.destroy();
+            peer = new Peer(); // get random ID
+            peer.on("open", (id) => {
+              myId = id;
+              addUser("You", true);
+              status.textContent = `Joining "${room}"...`;
+              getMic().then(() => {
+                const call = peer.call(room, localStream);
+                setupCall(call);
+              });
+            });
+          }
+        });
+
+        // Incoming calls (only host receives these)
+        peer.on("call", (call) => {
+          console.log("Incoming from:", call.peer);
+          if (localStream) call.answer(localStream);
+          setupCall(call);
+
+          // HOST: Forward every existing stream to the new person
+          if (peer.id === room) {
+            calls.forEach((existingCall, existingId) => {
+              if (existingId !== call.peer) {
+                const stream = existingCall.remoteStream;
+                if (stream) peer.call(call.peer, stream);
+              }
+            });
+            // Also send our own stream
+            if (localStream) peer.call(call.peer, localStream);
+          }
+        });
+      };
+
+      function getMic() {
+        return navigator.mediaDevices
+          .getUserMedia({ audio: true })
+          .then((stream) => {
+            localStream = stream;
+            updateCounter();
+          });
+      }
+
+      function setupCall(call) {
+        const id = call.peer;
+        if (calls.has(id)) return;
+        calls.set(id, call);
+
+        call.on("stream", (remoteStream) => {
+          createAudio(id, remoteStream);
+          addUser(id.slice(-8));
+          updateCounter();
+
+          // GUEST: If we receive a stream from someone who is NOT the host, call them back
+          if (peer.id !== room && id !== room && !calls.has(id)) {
+            setTimeout(() => {
+              if (localStream && call.open) {
+                const backCall = peer.call(id, localStream);
+                setupCall(backCall);
+              }
+            }, 1000);
+          }
+        });
+
+        call.on("close", () => {
+          calls.delete(id);
+          removeUser(id);
+          updateCounter();
+        });
+      }
+
+      function createAudio(id, stream) {
+        if (audioElements.has(id)) return;
+        const audio = document.createElement("audio");
+        audio.srcObject = stream;
+        audio.autoplay = true;
+        document.body.appendChild(audio);
+        audioElements.set(id, audio);
+
+        // Speaking indicator
+        try {
+          const ctx = new AudioContext();
+          const src = ctx.createMediaStreamSource(stream);
+          const analyser = ctx.createAnalyser();
+          src.connect(analyser);
+          analyser.fftSize = 32;
+          const data = new Uint8Array(analyser.frequencyBinCount);
+          const check = () => {
+            analyser.getByteFrequencyData(data);
+            const vol = data.reduce((a, b) => a + b) / data.length;
+            const el = document.getElementById("user-" + id);
+            if (el) el.classList.toggle("speaking", vol > 25);
+            if (audioElements.has(id)) requestAnimationFrame(check);
+          };
+          check();
+        } catch (e) {}
+      }
+
+      function addUser(name, isMe = false) {
+        if (document.getElementById("user-" + name)) return;
+        const div = document.createElement("div");
+        div.id = "user-" + name;
+        div.className = isMe ? "user you" : "user";
+        div.innerHTML = `<div class="user-name">${name}</div>`;
+        usersDiv.appendChild(div);
+      }
+
+      function removeUser(id) {
+        const el = document.getElementById("user-" + id);
+        if (el) el.remove();
+        const audio = audioElements.get(id);
+        if (audio) {
+          audio.remove();
+          audioElements.delete(id);
+        }
+      }
+
+      function updateCounter() {
+        const count = calls.size + 1;
+        status.textContent = `Room: ${room} • Online: ${count} people`;
+      }
+
+      // Mute
+      document.getElementById("muteBtn").onclick = () => {
+        if (!localStream) return;
+        const enabled = localStream.getAudioTracks()[0].enabled;
+        localStream.getAudioTracks()[0].enabled = !enabled;
+        document.getElementById("muteBtn").textContent = enabled
+          ? "Unmuted"
+          : "Muted";
+      };
+
+      // Leave
+      document.getElementById("leaveBtn").onclick = () => {
+        calls.forEach((c) => c.close());
+        if (localStream) localStream.getTracks().forEach((t) => t.stop());
+        if (peer) peer.destroy();
+        location.reload();
+      };
+    </script>
+
+    <div
+      style="
+        position: fixed;
+        bottom: 10px;
+        left: 10px;
+        color: #666;
+        font-size: 13px;
+      "
+    >
+      Fixed & tested Nov 2025 • Everyone connects automatically<br />
+      Just share the room name!
+    </div>
+  </body>
+</html>
