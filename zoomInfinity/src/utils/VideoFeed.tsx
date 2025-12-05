@@ -50,7 +50,7 @@ export const VideoFeed: React.FC<VideoFeedProps> = ({
       </div>
 
       {/* Overlay Info */}
-      <div className="absolute bottom-0 left-0 right-0 p-3 bg-from-black/80 bg-to-transparent flex justify-between items-end">
+      <div className="absolute bottom-0 left-0 right-0 p-3 bg-from-black/80 to-transparent flex justify-between items-end">
         <span className="text-sm font-medium text-white shadow-black drop-shadow-md truncate max-w-[70%]">
           {label} {isLocal ? "(You)" : ""}
         </span>

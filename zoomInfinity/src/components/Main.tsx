@@ -1,3 +1,4 @@
+// App.tsx
 import { useRef, useState } from "react";
 import Peer from "peerjs";
 import type { MediaConnection } from "peerjs";
@@ -5,59 +6,53 @@ import { VideoFeed } from "../utils/VideoFeed";
 import { ControlBar } from "../utils/ControlBar";
 
 export default function App() {
-  const [room, setRoom] = useState("party2025");
+  const [room, setRoom] = useState("ninja-room");
   const [joined, setJoined] = useState(false);
   const [myId, setMyId] = useState<string>("");
+  const [startWithVideo, setStartWithVideo] = useState(false);
 
-  // Media State
+  // Media state
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [muted, setMuted] = useState(false);
-  const [videoEnabled, setVideoEnabled] = useState(true);
+  const [videoEnabled, setVideoEnabled] = useState(false);
   const [screenSharing, setScreenSharing] = useState(false);
 
-  // Peer State (mapped by ID)
+  // Peers: Map<peerId, stream>
   const [peers, setPeers] = useState<Map<string, MediaStream>>(new Map());
 
   const peerRef = useRef<Peer | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null); // Keep a ref for immediate access in callbacks
+  const localStreamRef = useRef<MediaStream | null>(null);
   const callsRef = useRef<Map<string, MediaConnection>>(new Map());
 
-  // Add a peer's stream to state
+  // Add peer stream
   const addPeerStream = (id: string, stream: MediaStream) => {
     setPeers((prev) => {
-      const newMap = new Map(prev);
-      newMap.set(id, stream);
-      return newMap;
+      const updated = new Map(prev);
+      updated.set(id, stream);
+      return updated;
     });
   };
 
-  // Remove a peer
+  // Remove peer
   const removePeer = (id: string) => {
     setPeers((prev) => {
-      const newMap = new Map(prev);
-      newMap.delete(id);
-      return newMap;
+      const updated = new Map(prev);
+      updated.delete(id);
+      return updated;
     });
     callsRef.current.delete(id);
   };
 
-  // Handle incoming or outgoing call setup
+  // Setup incoming/outgoing call
   const setupCall = (
     call: MediaConnection,
     streamToAnswerWith?: MediaStream
   ) => {
     const peerId = call.peer;
 
-    // Prevent duplicate handling if we already have this call stored
-    if (callsRef.current.has(peerId)) {
-      // If we initiated the call, we might already have it.
-      // If it's incoming, we need to answer.
-      // For simplicity in this mesh, we might double-set, but let's check.
-    }
-
+    if (callsRef.current.has(peerId)) return;
     callsRef.current.set(peerId, call);
 
-    // If incoming call and we have a stream, answer it
     if (streamToAnswerWith) {
       call.answer(streamToAnswerWith);
     }
@@ -66,66 +61,59 @@ export default function App() {
       addPeerStream(peerId, remoteStream);
     });
 
-    call.on("close", () => {
-      removePeer(peerId);
-    });
-
+    call.on("close", () => removePeer(peerId));
     call.on("error", (err) => {
       console.error("Call error:", err);
       removePeer(peerId);
     });
   };
 
+  // Join as Host or Guest
   const join = async () => {
     try {
-      // 1. Get Initial Media (Audio + Video)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
-        video: true,
+        video: startWithVideo ? { width: 1280, height: 720 } : false,
       });
 
-      setLocalStream(stream);
       localStreamRef.current = stream;
+      setLocalStream(stream);
+      setVideoEnabled(startWithVideo);
 
-      // 2. Initialize Peer
+      // Try to become Host using room name as ID
       const peer = new Peer(room, {
         config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
-        debug: 1,
       });
 
       peer.on("open", (id) => {
-        console.log("Joined as Host:", id);
         setMyId(id);
         setJoined(true);
+        console.log("Host connected:", id);
       });
 
-      // Handle ID collision (Room taken -> Become Guest)
       peer.on("error", (err: any) => {
         if (err.type === "unavailable-id") {
           peer.destroy();
           initGuest(stream);
         } else {
-          console.error("Peer Error:", err);
-          alert("Connection error: " + err.type);
+          console.error(err);
+          alert("Connection failed: " + err.message);
         }
       });
 
-      // Handle Incoming Calls (Host Logic)
+      // Incoming calls (Host receives from guests)
       peer.on("call", (call) => {
         setupCall(call, stream);
 
-        // Logic to introduce new guest to existing peers (Mesh network coordination)
-        // Note: In a pure mesh without a server, usually everyone connects to everyone manually.
-        // Here, the host acts as a signaling helper by sending the peer list.
+        // Help new guest discover existing peers
         setTimeout(() => {
-          const existingPeers = Array.from(callsRef.current.keys()).filter(
+          const existing = Array.from(callsRef.current.keys()).filter(
             (id) => id !== call.peer
           );
-
-          if (existingPeers.length > 0) {
+          if (existing.length > 0) {
             const conn = peer.connect(call.peer);
             conn.on("open", () => {
-              conn.send({ type: "peer-list", peers: existingPeers });
+              conn.send({ type: "peer-list", peers: existing });
               setTimeout(() => conn.close(), 1000);
             });
           }
@@ -133,36 +121,35 @@ export default function App() {
       });
 
       peerRef.current = peer;
-    } catch (error) {
-      console.error("Error accessing media:", error);
-      alert("Microphone/Camera access required.");
+    } catch (err: any) {
+      if (err.name === "NotAllowedError" || err.name === "NotFoundError") {
+        alert("Microphone access is required to join the call.");
+      } else {
+        alert("Failed to access microphone/camera. Please check permissions.");
+      }
     }
   };
 
+  // Join as Guest
   const initGuest = (stream: MediaStream) => {
     const guest = new Peer();
 
     guest.on("open", (id) => {
-      console.log("Joined as Guest:", id);
       setMyId(id);
       setJoined(true);
+      console.log("Guest connected:", id);
 
-      // Call the Host immediately
+      // Call the host
       const call = guest.call(room, stream);
       setupCall(call);
     });
 
-    // Answer calls from other guests
-    guest.on("call", (call) => {
-      setupCall(call, stream);
-    });
+    guest.on("call", (call) => setupCall(call, stream));
 
-    // Receive Peer List from Host to connect to others
     guest.on("connection", (conn) => {
       conn.on("data", (data: any) => {
         if (data.type === "peer-list" && Array.isArray(data.peers)) {
           data.peers.forEach((peerId: string) => {
-            // Connect to other guests if not already connected
             if (!callsRef.current.has(peerId)) {
               const call = guest.call(peerId, stream);
               setupCall(call);
@@ -175,6 +162,7 @@ export default function App() {
     peerRef.current = guest;
   };
 
+  // Toggle microphone
   const toggleMute = () => {
     if (!localStreamRef.current) return;
     const audioTrack = localStreamRef.current.getAudioTracks()[0];
@@ -184,162 +172,179 @@ export default function App() {
     }
   };
 
+  // Toggle camera (can turn on even if started without video)
   const toggleVideo = async () => {
     if (!localStreamRef.current) return;
 
-    // If screen sharing, stop it first before toggling camera
     if (screenSharing) {
       await stopScreenShare();
       return;
     }
 
-    const videoTrack = localStreamRef.current.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      setVideoEnabled(videoTrack.enabled);
+    const hasVideo = localStreamRef.current.getVideoTracks().length > 0;
+
+    if (hasVideo) {
+      const track = localStreamRef.current.getVideoTracks()[0];
+      track.enabled = !track.enabled;
+      setVideoEnabled(track.enabled);
+    } else {
+      // First time enabling video
+      try {
+        const videoStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+        });
+        const videoTrack = videoStream.getVideoTracks()[0];
+
+        localStreamRef.current.addTrack(videoTrack);
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+        setVideoEnabled(true);
+
+        // Update all peers
+        callsRef.current.forEach((call) => {
+          const sender = call.peerConnection
+            .getSenders()
+            .find((s: RTCRtpSender) => s.track?.kind === "video");
+          sender?.replaceTrack(videoTrack);
+        });
+      } catch (err) {
+        alert("Could not access camera.");
+      }
     }
   };
 
+  // Screen Share
   const startScreenShare = async () => {
     try {
-      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
-        audio: false,
       });
 
-      const videoTrack = displayStream.getVideoTracks()[0];
-
-      videoTrack.onended = () => {
-        stopScreenShare();
-      };
+      const videoTrack = screenStream.getVideoTracks()[0];
+      videoTrack.onended = stopScreenShare;
 
       if (localStreamRef.current) {
-        const currentVideoTrack = localStreamRef.current.getVideoTracks()[0];
-        if (currentVideoTrack) {
-          localStreamRef.current.removeTrack(currentVideoTrack);
-
-          currentVideoTrack.stop();
+        const oldTrack = localStreamRef.current.getVideoTracks()[0];
+        if (oldTrack) {
+          localStreamRef.current.removeTrack(oldTrack);
+          oldTrack.stop();
         }
-        localStreamRef.current.addTrack(videoTrack);
 
-        // Force state update to re-render local video feed
+        localStreamRef.current.addTrack(videoTrack);
         setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
         setScreenSharing(true);
-        setVideoEnabled(true); // Screen share counts as "video on"
+        setVideoEnabled(true);
 
-        // Replace track in all active peer connections
-        replaceTrackInCalls(videoTrack);
+        // Replace in all calls
+        callsRef.current.forEach((call) => {
+          const sender = call.peerConnection
+            .getSenders()
+            .find((s: RTCRtpSender) => s.track?.kind === "video");
+          sender?.replaceTrack(videoTrack);
+        });
       }
     } catch (err) {
-      console.error("Error starting screen share:", err);
+      console.log("Screen share cancelled or failed");
     }
   };
 
   const stopScreenShare = async () => {
+    if (!screenSharing || !localStreamRef.current) return;
+
+    const screenTrack = localStreamRef.current.getVideoTracks()[0];
+    screenTrack?.stop();
+    localStreamRef.current.removeTrack(screenTrack);
+
     try {
-      // Get camera stream again
-      const cameraStream = await navigator.mediaDevices.getUserMedia({
+      const camStream = await navigator.mediaDevices.getUserMedia({
         video: true,
-        audio: true,
       });
+      const camTrack = camStream.getVideoTracks()[0];
 
-      const newVideoTrack = cameraStream.getVideoTracks()[0];
+      localStreamRef.current.addTrack(camTrack);
+      setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+      setScreenSharing(false);
 
-      // Clean up current screen share track
-      if (localStreamRef.current) {
-        const currentVideoTrack = localStreamRef.current.getVideoTracks()[0];
-        if (currentVideoTrack) {
-          currentVideoTrack.stop();
-          localStreamRef.current.removeTrack(currentVideoTrack);
-        }
-        localStreamRef.current.addTrack(newVideoTrack);
-
-        // Update state
-        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-        setScreenSharing(false);
-        setVideoEnabled(true);
-
-        // Replace track in calls
-        replaceTrackInCalls(newVideoTrack);
-      }
+      callsRef.current.forEach((call) => {
+        const sender = call.peerConnection
+          .getSenders()
+          .find((s: RTCRtpSender) => s.track?.kind === "video");
+        sender?.replaceTrack(camTrack);
+      });
     } catch (err) {
-      console.error("Error stopping screen share:", err);
+      setVideoEnabled(false); // No camera available
     }
   };
 
-  const replaceTrackInCalls = (newTrack: MediaStreamTrack) => {
-    callsRef.current.forEach((call) => {
-      const sender = call.peerConnection
-        .getSenders()
-        .find((s: RTCRtpSender) => s.track?.kind === "video");
-      if (sender) {
-        sender.replaceTrack(newTrack);
-      }
-    });
-  };
+  const toggleScreenShare = () =>
+    screenSharing ? stopScreenShare() : startScreenShare();
 
-  const toggleScreenShare = () => {
-    if (screenSharing) {
-      stopScreenShare();
-    } else {
-      startScreenShare();
-    }
-  };
-
+  // Leave call
   const leave = () => {
-    // Stop all tracks
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => track.stop());
-    }
-
-    // Close calls
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
     callsRef.current.forEach((call) => call.close());
     callsRef.current.clear();
-
-    // Destroy peer
-    if (peerRef.current) {
-      peerRef.current.destroy();
-    }
+    peerRef.current?.destroy();
 
     setJoined(false);
     setPeers(new Map());
     setLocalStream(null);
     setScreenSharing(false);
-    setVideoEnabled(true);
+    setVideoEnabled(false);
     setMuted(false);
   };
 
-  // --- Render ---
-
+  // Render: Pre-join screen
   if (!joined) {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center p-4">
-        <div className="bg-zinc-900 border border-zinc-700 rounded-3xl p-8 md:p-12 text-center max-w-lg w-full shadow-2xl relative overflow-hidden">
-          {/* Decorative gradients */}
-          <div className="absolute top-0 left-0 w-full h-2 bg-linear-to-r from-emerald-500 via-blue-500 to-purple-500"></div>
+        <div className="bg-zinc-900 border border-zinc-700 rounded-3xl p-8 md:p-12 text-center max-w-lg w-full shadow-2xl">
+          <div className="h-2 bg-linear-to-r from-emerald-500 via-blue-500 to-purple-500 rounded-t-3xl -mt-8 -mx-8 mb-8"></div>
 
           <h1 className="text-5xl font-bold bg-clip-text text-transparent bg-linear-to-br from-emerald-400 to-emerald-600 mb-2">
-            Party2025
+            AI Crafter
           </h1>
-          <p className="text-zinc-400 mb-8 text-lg">
+          <p className="text-zinc-400 mb-10 text-lg">
             Group Video & Screen Sharing
           </p>
 
-          <div className="relative mb-6">
-            <input
-              value={room}
-              onChange={(e) => setRoom(e.target.value)}
-              className="w-full px-6 py-4 bg-zinc-800 text-white rounded-xl text-xl outline-none border-2 border-transparent focus:border-emerald-500 transition-all placeholder-zinc-500"
-              placeholder="Enter Room Name"
-            />
+          <input
+            value={room}
+            onChange={(e) => setRoom(e.target.value)}
+            placeholder="Room name"
+            className="w-full px-6 py-4 bg-zinc-800 rounded-xl text-xl outline-none focus:border-emerald-500 border-2 border-transparent transition mb-8"
+          />
+
+          <div className="flex items-center justify-center gap-4 mb-10">
+            <button
+              onClick={() => setStartWithVideo(!startWithVideo)}
+              className={`relative inline-flex h-8 w-16 rounded-full hover:cursor-pointer transition ${
+                startWithVideo ? "bg-emerald-500" : "bg-zinc-700"
+              }`}
+            >
+              <span
+                className={`inline-block h-8 w-8 bg-white rounded-full shadow transform transition ${
+                  startWithVideo ? "translate-x-8" : "translate-x-0"
+                }`}
+              />
+            </button>
+            <span className="text-lg">
+              Start with{" "}
+              <span className="text-emerald-400 font-medium">
+                video {startWithVideo ? "on" : "off"}
+              </span>
+            </span>
           </div>
 
           <button
             onClick={join}
-            className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-2xl py-4 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
+            className="w-full bg-emerald-500 hover:cursor-pointer hover:bg-emerald-400 text-black font-bold text-2xl py-5 rounded-xl transition transform hover:scale-105 active:scale-95"
           >
-            Join Call
+            Join Call {startWithVideo ? "with Video" : "(Audio Only)"}
           </button>
+
+          <p className="mt-6 text-sm text-zinc-500">
+            Microphone required • Video optional
+          </p>
         </div>
       </div>
     );
@@ -350,64 +355,58 @@ export default function App() {
   return (
     <div className="min-h-screen bg-black text-white relative">
       {/* Header */}
-      <header className="absolute top-0 left-0 right-0 p-6 z-10 flex justify-between items-start pointer-events-none">
+      <header className="absolute top-0 left-0 right-0 p-6 z-10 flex justify-between items-start">
         <div>
-          <h1 className="text-2xl font-bold text-emerald-500 drop-shadow-md pointer-events-auto">
-            Party2025
-          </h1>
-          <div className="bg-zinc-900/80 backdrop-blur px-3 py-1 rounded-full mt-2 inline-flex items-center gap-2 pointer-events-auto">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-            <span className="text-xs text-zinc-300 font-mono">{room}</span>
+          <h1 className="text-3xl font-bold text-emerald-500">AI Crafter</h1>
+          <div className="flex items-center gap-2 mt-2 bg-zinc-900/80 backdrop-blur px-4 py-2 rounded-full">
+            <div className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
+            <span className="text-sm font-mono">{room}</span>
           </div>
         </div>
-        <div className="bg-zinc-900/80 backdrop-blur px-4 py-2 rounded-lg pointer-events-auto">
-          <span className="text-zinc-300 text-sm font-medium">
-            {peerArray.length + 1} Participants
-          </span>
+        <div className="bg-zinc-900/80 backdrop-blur px-5 py-3 rounded-xl">
+          <span className="font-medium">{peerArray.length + 1} online</span>
         </div>
       </header>
 
       {/* Video Grid */}
-      <main className="p-4 md:p-6 h-screen flex flex-col justify-center">
+      <main className="h-screen flex flex-col justify-center p-6 pb-32">
         <div
-          className={`grid gap-4 w-full max-w-7xl mx-auto auto-rows-fr ${
+          className={`grid gap-4 max-w-7xl mx-auto w-full ${
             peerArray.length + 1 === 1
-              ? "grid-cols-1 max-w-4xl"
-              : peerArray.length + 1 <= 2
-              ? "grid-cols-1 md:grid-cols-2"
+              ? "grid-cols-1"
               : peerArray.length + 1 <= 4
               ? "grid-cols-2"
-              : peerArray.length + 1 <= 6
-              ? "grid-cols-2 lg:grid-cols-3"
-              : "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
-          }`}
+              : peerArray.length + 1 <= 9
+              ? "grid-cols-3"
+              : "grid-cols-4"
+          } auto-rows-fr`}
         >
-          {/* My Feed */}
+          {/* Local Video */}
           <VideoFeed
             stream={localStream}
             isLocal={true}
-            label={myId === room ? `${myId} (Host)` : myId}
+            label={myId === room ? `${myId} (You - Host)` : myId}
             isMuted={muted}
             isVideoOff={!videoEnabled && !screenSharing}
           />
 
-          {/* Peer Feeds */}
+          {/* Remote Peers */}
           {peerArray.map(([id, stream]) => (
             <VideoFeed
               key={id}
               stream={stream}
               label={id}
-              isMuted={false} // We don't track peer mute state in this simple version, assume audio track handles silence
+              isMuted={false}
               isVideoOff={
                 stream.getVideoTracks().length === 0 ||
-                !stream.getVideoTracks()[0].enabled
+                !stream.getVideoTracks()[0]?.enabled
               }
             />
           ))}
         </div>
       </main>
 
-      {/* Controls */}
+      {/* Control Bar */}
       <ControlBar
         muted={muted}
         videoEnabled={videoEnabled || screenSharing}

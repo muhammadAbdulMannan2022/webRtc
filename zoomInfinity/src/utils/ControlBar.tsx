@@ -25,7 +25,7 @@ export const ControlBar: React.FC<ControlBarProps> = ({
       {/* Audio Toggle */}
       <button
         onClick={onToggleMute}
-        className={`p-4 rounded-full transition-all duration-200 ${
+        className={`p-4 rounded-full hover:cursor-pointer transition-all duration-200 ${
           muted
             ? "bg-red-500 hover:bg-red-600 text-white"
             : "bg-zinc-700 hover:bg-zinc-600 text-white"
