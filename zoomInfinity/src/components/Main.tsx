@@ -1,227 +1,422 @@
-"use client";
-
 import { useRef, useState } from "react";
 import Peer from "peerjs";
+import type { MediaConnection } from "peerjs";
+import { VideoFeed } from "../utils/VideoFeed";
+import { ControlBar } from "../utils/ControlBar";
 
 export default function App() {
   const [room, setRoom] = useState("party2025");
   const [joined, setJoined] = useState(false);
+  const [myId, setMyId] = useState<string>("");
+
+  // Media State
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [muted, setMuted] = useState(false);
-  const [peers, setPeers] = useState<string[]>([]);
+  const [videoEnabled, setVideoEnabled] = useState(true);
+  const [screenSharing, setScreenSharing] = useState(false);
+
+  // Peer State (mapped by ID)
+  const [peers, setPeers] = useState<Map<string, MediaStream>>(new Map());
 
   const peerRef = useRef<Peer | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const callsRef = useRef<Map<string, any>>(new Map());
-  const audioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const localStreamRef = useRef<MediaStream | null>(null); // Keep a ref for immediate access in callbacks
+  const callsRef = useRef<Map<string, MediaConnection>>(new Map());
+
+  // Add a peer's stream to state
+  const addPeerStream = (id: string, stream: MediaStream) => {
+    setPeers((prev) => {
+      const newMap = new Map(prev);
+      newMap.set(id, stream);
+      return newMap;
+    });
+  };
+
+  // Remove a peer
+  const removePeer = (id: string) => {
+    setPeers((prev) => {
+      const newMap = new Map(prev);
+      newMap.delete(id);
+      return newMap;
+    });
+    callsRef.current.delete(id);
+  };
+
+  // Handle incoming or outgoing call setup
+  const setupCall = (
+    call: MediaConnection,
+    streamToAnswerWith?: MediaStream
+  ) => {
+    const peerId = call.peer;
+
+    // Prevent duplicate handling if we already have this call stored
+    if (callsRef.current.has(peerId)) {
+      // If we initiated the call, we might already have it.
+      // If it's incoming, we need to answer.
+      // For simplicity in this mesh, we might double-set, but let's check.
+    }
+
+    callsRef.current.set(peerId, call);
+
+    // If incoming call and we have a stream, answer it
+    if (streamToAnswerWith) {
+      call.answer(streamToAnswerWith);
+    }
+
+    call.on("stream", (remoteStream) => {
+      addPeerStream(peerId, remoteStream);
+    });
+
+    call.on("close", () => {
+      removePeer(peerId);
+    });
+
+    call.on("error", (err) => {
+      console.error("Call error:", err);
+      removePeer(peerId);
+    });
+  };
 
   const join = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
+      // 1. Get Initial Media (Audio + Video)
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: true,
+      });
 
-      // Try to be host
+      setLocalStream(stream);
+      localStreamRef.current = stream;
+
+      // 2. Initialize Peer
       const peer = new Peer(room, {
         config: { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] },
+        debug: 1,
       });
 
       peer.on("open", (id) => {
-        console.log("HOST:", id);
+        console.log("Joined as Host:", id);
+        setMyId(id);
         setJoined(true);
       });
 
+      // Handle ID collision (Room taken -> Become Guest)
       peer.on("error", (err: any) => {
         if (err.type === "unavailable-id") {
           peer.destroy();
-          const guest = new Peer();
-
-          guest.on("open", (guestId) => {
-            console.log("GUEST:", guestId);
-            setJoined(true);
-            const call = guest.call(room, stream);
-            handleCall(call, guest);
-          });
-
-          // Guests listen for incoming calls from other guests
-          guest.on("call", (call) => {
-            call.answer(stream);
-            handleCall(call, guest);
-          });
-
-          // Guests receive peer list from host
-          guest.on("connection", (conn) => {
-            conn.on("data", (data: any) => {
-              if (data.type === "peer-list") {
-                // Call all existing peers
-                data.peers.forEach((peerId: string) => {
-                  setTimeout(() => {
-                    if (!callsRef.current.has(peerId)) {
-                      const call = guest.call(peerId, stream);
-                      handleCall(call, guest);
-                    }
-                  }, 500);
-                });
-              }
-            });
-          });
-
-          peerRef.current = guest;
+          initGuest(stream);
+        } else {
+          console.error("Peer Error:", err);
+          alert("Connection error: " + err.type);
         }
       });
 
-      // Host listens for incoming calls
+      // Handle Incoming Calls (Host Logic)
       peer.on("call", (call) => {
-        call.answer(stream);
-        handleCall(call, peer);
+        setupCall(call, stream);
 
-        // HOST: Tell new guest about all existing peers
+        // Logic to introduce new guest to existing peers (Mesh network coordination)
+        // Note: In a pure mesh without a server, usually everyone connects to everyone manually.
+        // Here, the host acts as a signaling helper by sending the peer list.
         setTimeout(() => {
           const existingPeers = Array.from(callsRef.current.keys()).filter(
             (id) => id !== call.peer
           );
 
-          // Send list of existing peers to new guest via data channel
-          const conn = peer.connect(call.peer);
-          conn.on("open", () => {
-            conn.send({ type: "peer-list", peers: existingPeers });
-          });
+          if (existingPeers.length > 0) {
+            const conn = peer.connect(call.peer);
+            conn.on("open", () => {
+              conn.send({ type: "peer-list", peers: existingPeers });
+              setTimeout(() => conn.close(), 1000);
+            });
+          }
         }, 1000);
       });
 
       peerRef.current = peer;
     } catch (error) {
-      console.error("Error accessing microphone:", error);
-      alert("Please allow microphone access to join the call");
+      console.error("Error accessing media:", error);
+      alert("Microphone/Camera access required.");
     }
   };
-  // @ts-ignore
-  const handleCall = (call: any, peer: Peer) => {
-    const id = call.peer;
-    if (callsRef.current.has(id)) return;
-    callsRef.current.set(id, call);
 
-    call.on("stream", (remoteStream: MediaStream) => {
-      if (audioRefs.current.has(id)) return;
-      const audio = new Audio();
-      audio.srcObject = remoteStream;
-      audio.autoplay = true;
-      document.body.appendChild(audio);
-      audioRefs.current.set(id, audio);
+  const initGuest = (stream: MediaStream) => {
+    const guest = new Peer();
 
-      setPeers((p) => [...new Set([...p, id])]);
+    guest.on("open", (id) => {
+      console.log("Joined as Guest:", id);
+      setMyId(id);
+      setJoined(true);
+
+      // Call the Host immediately
+      const call = guest.call(room, stream);
+      setupCall(call);
     });
 
-    call.on("close", () => {
-      audioRefs.current.get(id)?.remove();
-      audioRefs.current.delete(id);
-      callsRef.current.delete(id);
-      setPeers((p) => p.filter((x) => x !== id));
+    // Answer calls from other guests
+    guest.on("call", (call) => {
+      setupCall(call, stream);
     });
+
+    // Receive Peer List from Host to connect to others
+    guest.on("connection", (conn) => {
+      conn.on("data", (data: any) => {
+        if (data.type === "peer-list" && Array.isArray(data.peers)) {
+          data.peers.forEach((peerId: string) => {
+            // Connect to other guests if not already connected
+            if (!callsRef.current.has(peerId)) {
+              const call = guest.call(peerId, stream);
+              setupCall(call);
+            }
+          });
+        }
+      });
+    });
+
+    peerRef.current = guest;
   };
 
   const toggleMute = () => {
-    if (!streamRef.current) return;
-    const enabled = streamRef.current.getAudioTracks()[0].enabled;
-    streamRef.current.getAudioTracks()[0].enabled = !enabled;
-    setMuted(!enabled);
+    if (!localStreamRef.current) return;
+    const audioTrack = localStreamRef.current.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      setMuted(!audioTrack.enabled);
+    }
+  };
+
+  const toggleVideo = async () => {
+    if (!localStreamRef.current) return;
+
+    // If screen sharing, stop it first before toggling camera
+    if (screenSharing) {
+      await stopScreenShare();
+      return;
+    }
+
+    const videoTrack = localStreamRef.current.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.enabled = !videoTrack.enabled;
+      setVideoEnabled(videoTrack.enabled);
+    }
+  };
+
+  const startScreenShare = async () => {
+    try {
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+
+      const videoTrack = displayStream.getVideoTracks()[0];
+
+      videoTrack.onended = () => {
+        stopScreenShare();
+      };
+
+      if (localStreamRef.current) {
+        const currentVideoTrack = localStreamRef.current.getVideoTracks()[0];
+        if (currentVideoTrack) {
+          localStreamRef.current.removeTrack(currentVideoTrack);
+
+          currentVideoTrack.stop();
+        }
+        localStreamRef.current.addTrack(videoTrack);
+
+        // Force state update to re-render local video feed
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+        setScreenSharing(true);
+        setVideoEnabled(true); // Screen share counts as "video on"
+
+        // Replace track in all active peer connections
+        replaceTrackInCalls(videoTrack);
+      }
+    } catch (err) {
+      console.error("Error starting screen share:", err);
+    }
+  };
+
+  const stopScreenShare = async () => {
+    try {
+      // Get camera stream again
+      const cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
+      const newVideoTrack = cameraStream.getVideoTracks()[0];
+
+      // Clean up current screen share track
+      if (localStreamRef.current) {
+        const currentVideoTrack = localStreamRef.current.getVideoTracks()[0];
+        if (currentVideoTrack) {
+          currentVideoTrack.stop();
+          localStreamRef.current.removeTrack(currentVideoTrack);
+        }
+        localStreamRef.current.addTrack(newVideoTrack);
+
+        // Update state
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+        setScreenSharing(false);
+        setVideoEnabled(true);
+
+        // Replace track in calls
+        replaceTrackInCalls(newVideoTrack);
+      }
+    } catch (err) {
+      console.error("Error stopping screen share:", err);
+    }
+  };
+
+  const replaceTrackInCalls = (newTrack: MediaStreamTrack) => {
+    callsRef.current.forEach((call) => {
+      const sender = call.peerConnection
+        .getSenders()
+        .find((s: RTCRtpSender) => s.track?.kind === "video");
+      if (sender) {
+        sender.replaceTrack(newTrack);
+      }
+    });
+  };
+
+  const toggleScreenShare = () => {
+    if (screenSharing) {
+      stopScreenShare();
+    } else {
+      startScreenShare();
+    }
   };
 
   const leave = () => {
-    callsRef.current.forEach((c) => c.close());
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    peerRef.current?.destroy();
-    audioRefs.current.forEach((a) => a.remove());
+    // Stop all tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+    }
 
-    // Clean up state
+    // Close calls
+    callsRef.current.forEach((call) => call.close());
     callsRef.current.clear();
-    audioRefs.current.clear();
+
+    // Destroy peer
+    if (peerRef.current) {
+      peerRef.current.destroy();
+    }
+
     setJoined(false);
+    setPeers(new Map());
+    setLocalStream(null);
+    setScreenSharing(false);
+    setVideoEnabled(true);
     setMuted(false);
-    setPeers([]);
   };
+
+  // --- Render ---
 
   if (!joined) {
     return (
-      <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <div className="bg-zinc-900 border-4 border-emerald-500 rounded-3xl p-16 text-center max-w-lg w-full mx-4">
-          <h1 className="text-6xl font-bold text-emerald-400 mb-8">
-            Group Call
+      <div className="min-h-screen bg-black text-white flex items-center justify-center p-4">
+        <div className="bg-zinc-900 border border-zinc-700 rounded-3xl p-8 md:p-12 text-center max-w-lg w-full shadow-2xl relative overflow-hidden">
+          {/* Decorative gradients */}
+          <div className="absolute top-0 left-0 w-full h-2 bg-linear-to-r from-emerald-500 via-blue-500 to-purple-500"></div>
+
+          <h1 className="text-5xl font-bold bg-clip-text text-transparent bg-linear-to-br from-emerald-400 to-emerald-600 mb-2">
+            Party2025
           </h1>
-          <input
-            value={room}
-            onChange={(e) => setRoom(e.target.value)}
-            className="w-full px-6 py-4 bg-zinc-800 rounded-xl text-2xl mb-6 outline-none focus:ring-4 focus:ring-emerald-500"
-            placeholder="Room name"
-          />
+          <p className="text-zinc-400 mb-8 text-lg">
+            Group Video & Screen Sharing
+          </p>
+
+          <div className="relative mb-6">
+            <input
+              value={room}
+              onChange={(e) => setRoom(e.target.value)}
+              className="w-full px-6 py-4 bg-zinc-800 text-white rounded-xl text-xl outline-none border-2 border-transparent focus:border-emerald-500 transition-all placeholder-zinc-500"
+              placeholder="Enter Room Name"
+            />
+          </div>
+
           <button
             onClick={join}
-            className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-3xl py-6 rounded-xl transition-colors"
+            className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold text-2xl py-4 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98]"
           >
-            Join Room
+            Join Call
           </button>
         </div>
       </div>
     );
   }
 
+  const peerArray = Array.from(peers.entries());
+
   return (
-    <div className="min-h-screen bg-black text-white p-6 md:p-10">
-      <h1 className="text-4xl md:text-6xl font-bold text-emerald-400 text-center mb-4">
-        🎤 Group Call
-      </h1>
-      <p className="text-2xl md:text-3xl text-emerald-300 text-center mb-12">
-        Room: <span className="font-mono">{room}</span> • Online:{" "}
-        {peers.length + 1}
-      </p>
-
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6 md:gap-10 max-w-7xl mx-auto">
-        <div className="bg-zinc-900 border-4 border-emerald-500 rounded-3xl p-6 md:p-10 text-center">
-          <div className="w-20 h-20 md:w-32 md:h-32 bg-emerald-600 rounded-full mx-auto mb-4 flex items-center justify-center">
-            <span className="text-4xl md:text-6xl">👤</span>
+    <div className="min-h-screen bg-black text-white relative">
+      {/* Header */}
+      <header className="absolute top-0 left-0 right-0 p-6 z-10 flex justify-between items-start pointer-events-none">
+        <div>
+          <h1 className="text-2xl font-bold text-emerald-500 drop-shadow-md pointer-events-auto">
+            Party2025
+          </h1>
+          <div className="bg-zinc-900/80 backdrop-blur px-3 py-1 rounded-full mt-2 inline-flex items-center gap-2 pointer-events-auto">
+            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+            <span className="text-xs text-zinc-300 font-mono">{room}</span>
           </div>
-          <p className="text-lg md:text-2xl font-semibold">You</p>
-          {peerRef.current?.id === room && (
-            <span className="text-emerald-400 text-sm md:text-base">Host</span>
-          )}
-          {muted && (
-            <span className="text-red-500 text-2xl md:text-4xl mt-2 inline-block">
-              🔇
-            </span>
-          )}
         </div>
+        <div className="bg-zinc-900/80 backdrop-blur px-4 py-2 rounded-lg pointer-events-auto">
+          <span className="text-zinc-300 text-sm font-medium">
+            {peerArray.length + 1} Participants
+          </span>
+        </div>
+      </header>
 
-        {peers.map((id) => (
-          <div
-            key={id}
-            className="bg-zinc-800 border-4 border-zinc-700 rounded-3xl p-6 md:p-10 text-center"
-          >
-            <div className="w-20 h-20 md:w-32 md:h-32 bg-zinc-700 rounded-full mx-auto mb-4 flex items-center justify-center">
-              <span className="text-4xl md:text-6xl">🔊</span>
-            </div>
-            <p className="text-sm md:text-xl font-mono truncate">
-              {id.slice(-8)}
-            </p>
-          </div>
-        ))}
-      </div>
-
-      <div className="fixed bottom-6 md:bottom-10 left-1/2 -translate-x-1/2 flex gap-4 md:gap-8 px-4">
-        <button
-          onClick={toggleMute}
-          className={`px-8 md:px-16 py-4 md:py-8 rounded-3xl text-xl md:text-3xl font-bold transition-colors ${
-            muted
-              ? "bg-red-600 hover:bg-red-500"
-              : "bg-emerald-500 hover:bg-emerald-400 text-black"
+      {/* Video Grid */}
+      <main className="p-4 md:p-6 h-screen flex flex-col justify-center">
+        <div
+          className={`grid gap-4 w-full max-w-7xl mx-auto auto-rows-fr ${
+            peerArray.length + 1 === 1
+              ? "grid-cols-1 max-w-4xl"
+              : peerArray.length + 1 <= 2
+              ? "grid-cols-1 md:grid-cols-2"
+              : peerArray.length + 1 <= 4
+              ? "grid-cols-2"
+              : peerArray.length + 1 <= 6
+              ? "grid-cols-2 lg:grid-cols-3"
+              : "grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
           }`}
         >
-          {muted ? "🔇 Unmute" : "🎤 Mute"}
-        </button>
-        <button
-          onClick={leave}
-          className="px-8 md:px-16 py-4 md:py-8 bg-red-600 hover:bg-red-500 rounded-3xl text-xl md:text-3xl font-bold transition-colors"
-        >
-          📞 Leave
-        </button>
-      </div>
+          {/* My Feed */}
+          <VideoFeed
+            stream={localStream}
+            isLocal={true}
+            label={myId === room ? `${myId} (Host)` : myId}
+            isMuted={muted}
+            isVideoOff={!videoEnabled && !screenSharing}
+          />
+
+          {/* Peer Feeds */}
+          {peerArray.map(([id, stream]) => (
+            <VideoFeed
+              key={id}
+              stream={stream}
+              label={id}
+              isMuted={false} // We don't track peer mute state in this simple version, assume audio track handles silence
+              isVideoOff={
+                stream.getVideoTracks().length === 0 ||
+                !stream.getVideoTracks()[0].enabled
+              }
+            />
+          ))}
+        </div>
+      </main>
+
+      {/* Controls */}
+      <ControlBar
+        muted={muted}
+        videoEnabled={videoEnabled || screenSharing}
+        screenSharing={screenSharing}
+        onToggleMute={toggleMute}
+        onToggleVideo={toggleVideo}
+        onToggleScreenShare={toggleScreenShare}
+        onLeave={leave}
+      />
     </div>
   );
 }
